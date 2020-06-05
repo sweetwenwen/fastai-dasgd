@@ -8,7 +8,7 @@ from ..callback import Callback
 
 __all__ = ['LanguageModelPreLoader', 'SortSampler', 'SortishSampler', 'TextList', 'pad_collate', 'TextDataBunch',
            'TextLMDataBunch', 'TextClasDataBunch', 'Text', 'open_text', 'TokenizeProcessor', 'NumericalizeProcessor',
-           'OpenFileProcessor', 'LMLabelList', 'LMTextList', 'SPProcessor']
+           'OpenFileProcessor', 'LMLabelList', 'LMTextList']
 
 TextMtd = IntEnum('TextMtd', 'DF TOK IDS')
 text_extensions = {'.txt'}
@@ -51,7 +51,7 @@ class LanguageModelPreLoader(Callback):
         self.ri    = np.zeros(self.bs, dtype=np.int)
 
     def on_epoch_begin(self, **kwargs):
-        if self.idx is None or len(self.idx) != len(self.dataset.x.items): self.allocate_buffers()
+        if self.idx is None: self.allocate_buffers()
         elif self.shuffle:   self.idx.shuffle()
         self.idx.forward = not self.backwards
 
@@ -158,7 +158,6 @@ class TextDataBunch(DataBunch):
         if not is1d(train_lbls): src.train.y.one_hot,src.valid.y.one_hot = True,True
         if test_ids is not None: src.add_test(TextList(test_ids, vocab, path=path), label=train_lbls[0])
         src.valid.x.processor = ifnone(processor, [TokenizeProcessor(), NumericalizeProcessor(vocab=vocab)])
-        if classes is not None: src.valid.y.processor = ifnone(processor, [CategoryProcessor(src.valid.y)])
         return src.databunch(**kwargs)
 
     @classmethod
@@ -311,8 +310,8 @@ class NumericalizeProcessor(PreProcessor):
 
 class OpenFileProcessor(PreProcessor):
     "`PreProcessor` that opens the filenames and read the texts."
-    def process(self, ds:Collection): ds.items = array([self.process_one(item) for item in ds.items], dtype=np.object)
-    def process_one(self,item): return open_text(item) if isinstance(item, Path) else item
+    def process_one(self,item):
+        return open_text(item) if isinstance(item, Path) else item
 
 class TextList(ItemList):
     "Basic `ItemList` for text data."
@@ -320,14 +319,14 @@ class TextList(ItemList):
     _processor = [TokenizeProcessor, NumericalizeProcessor]
     _is_lm = False
 
-    def __init__(self, items:Iterator, vocab:Vocab=None, pad_idx:int=1, sep=' ', **kwargs):
+    def __init__(self, items:Iterator, vocab:Vocab=None, pad_idx:int=1, **kwargs):
         super().__init__(items, **kwargs)
-        self.vocab,self.pad_idx,self.sep = vocab,pad_idx,sep
-        self.copy_new += ['vocab', 'pad_idx', 'sep']
+        self.vocab,self.pad_idx = vocab,pad_idx
+        self.copy_new += ['vocab', 'pad_idx']
 
     def get(self, i):
         o = super().get(i)
-        return o if self.vocab is None else Text(o, self.vocab.textify(o, self.sep))
+        return Text(o, self.vocab.textify(o))
 
     def label_for_lm(self, **kwargs):
         "A special labelling method for language models."
@@ -393,92 +392,3 @@ def _join_texts(texts:Collection[str], mark_fields:bool=False, include_bos:bool=
         text_col += (f' {FLD} {i+1} ' if mark_fields else ' ') + df[i].astype(str)
     if include_eos: text_col = text_col + f' {EOS}'
     return text_col.values
-
-def apply_rules(text, pre_rules=None, post_rules=None):
-    "Apply `pre_rules` and `post_rules` to `text`"
-    text = text.strip(' ')
-    for r in ifnone(pre_rules, defaults.text_pre_rules): text = r(text)
-    toks = text.split()
-    for r in ifnone(post_rules, defaults.text_post_rules): toks = r(toks)
-    return ' '.join(toks) 
-
-def get_default_size(texts, max_vocab_sz):
-    "Either max_vocab_sz or one quarter of the number of unique words in `texts`"
-    cnt = Counter()
-    for t in texts: 
-        cnt.update(t.split())
-        if len(cnt)//4 > max_vocab_sz: return max_vocab_sz
-    res = len(cnt)//4
-    while res%8 != 0: res+=1
-    return res
-
-full_char_coverage_langs = ["bg", "cs", "da", "de", "el", "en", "es", "et", "fi", "fr", "ga", "hr", "hu",
-                       "it","lt","lv","mt","nl","pl","pt","ro","sk","sl","sv"] # all European langs
-
-def train_sentencepiece(texts:Collection[str], path:PathOrStr, pre_rules: ListRules=None, post_rules:ListRules=None, 
-    vocab_sz:int=None, max_vocab_sz:int=30000, model_type:str='unigram', max_sentence_len:int=20480, lang='en',
-    char_coverage=None, tmp_dir='tmp', enc='utf8'):
-    "Train a sentencepiece tokenizer on `texts` and save it in `path/tmp_dir`"
-    from sentencepiece import SentencePieceTrainer
-    cache_dir = Path(path)/tmp_dir
-    os.makedirs(cache_dir, exist_ok=True)
-    if vocab_sz is None: vocab_sz=get_default_size(texts, max_vocab_sz)
-    raw_text_path = cache_dir / 'all_text.out'
-    with open(raw_text_path, 'w', encoding=enc) as f: f.write("\n".join(texts))
-    spec_tokens = ['\u2581'+s for s in defaults.text_spec_tok]
-    cache_dir = cache_dir/'spm'
-    SentencePieceTrainer.Train(" ".join([
-        f"--input={raw_text_path} --max_sentence_length={max_sentence_len}",
-        f"--character_coverage={ifnone(char_coverage, 0.99999 if lang in full_char_coverage_langs else 0.9998)}",
-        f"--unk_id={len(defaults.text_spec_tok)} --pad_id=-1 --bos_id=-1 --eos_id=-1",
-        f"--user_defined_symbols={','.join(spec_tokens)}",
-        f'--model_prefix="cache_dir" --vocab_size={vocab_sz} --model_type={model_type}']))
-    raw_text_path.unlink()
-    return cache_dir
-
-class SPProcessor(PreProcessor):
-    "`PreProcessor` that tokenizes and numericalizes with `sentencepiece`"
-    def __init__(self, ds:ItemList=None, pre_rules: ListRules=None, post_rules:ListRules=None, vocab_sz:int=None,
-                 max_vocab_sz:int=30000, model_type:str='unigram', max_sentence_len:int=20480, lang='en',
-                 char_coverage=None, tmp_dir='tmp', mark_fields:bool=False, include_bos:bool=True, 
-                 include_eos:bool=False, sp_model=None, sp_vocab=None, n_cpus:int=None, enc='utf8'):
-        try: from sentencepiece import SentencePieceTrainer,SentencePieceProcessor
-        except ImportError:
-            raise Exception('sentencepiece module is missing: run `pip install sentencepiece`')
-        self.pre_rules,self.post_rules,self.enc = pre_rules,post_rules,enc
-        self.mark_fields,self.include_bos,self.include_eos = mark_fields,include_bos,include_eos
-        self.sp_model,self.sp_vocab,self.n_cpus = sp_model,sp_vocab,ifnone(n_cpus,defaults.cpus)
-        self.train_func = partial(train_sentencepiece, pre_rules=pre_rules, post_rules=post_rules, vocab_sz=vocab_sz,
-                max_vocab_sz=max_vocab_sz, model_type=model_type, max_sentence_len=max_sentence_len, lang=lang,
-                char_coverage=char_coverage, tmp_dir=tmp_dir, enc=enc)
-
-    def process_one(self, item, join=True):
-        if join: text = _join_texts([item], self.mark_fields, self.include_bos, self.include_eos)[0]
-        text = apply_rules(text, pre_rules=self.pre_rules, post_rules=self.post_rules)
-        return self._encode_batch([text])[0]
-
-    def process(self, ds):
-        ds.items = _join_texts(ds.items, self.mark_fields, self.include_bos, self.include_eos)
-        ds.items = [apply_rules(t, pre_rules=self.pre_rules, post_rules=self.post_rules) 
-                    for t in progress_bar(ds.items, leave=False)]
-        if self.sp_model is None or self.sp_vocab is None:
-            cache_dir = self.train_func(ds.items, ds.path)
-            self.sp_model,self.sp_vocab = cache_dir/'spm.model',cache_dir/'spm.vocab'
-        if not getattr(self, 'vocab', False): 
-            with open(self.sp_vocab, 'r', encoding=self.enc) as f: self.vocab = Vocab([line.split('\t')[0] for line in f.readlines()])
-        if self.n_cpus <= 1: ds.items = self._encode_batch(ds.items)
-        else:
-            with ProcessPoolExecutor(self.n_cpus) as e:
-                ds.items = np.array(sum(e.map(self._encode_batch, partition_by_cores(ds.items, self.n_cpus)), []))
-        ds.vocab = self.vocab
-
-    def _encode_batch(self, texts):
-        from sentencepiece import SentencePieceProcessor
-        tok = SentencePieceProcessor()
-        tok.Load(str(self.sp_model))
-        return [np.array(tok.EncodeAsIds(t)) for t in texts]
-
-    @classmethod
-    def load(cls, path:PathOrStr, tmp_dir:PathOrStr='tmp', name:str='spm'):
-        cache_dir = Path(path)/tmp_dir
-        return cls(sp_model=cache_dir/f'{name}.model', sp_vocab=cache_dir/f'{name}.vocab')

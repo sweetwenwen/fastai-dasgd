@@ -12,16 +12,16 @@ from .models import *
 from .transform import *
 from .data import *
 
-__all__ = ['RNNLearner', 'LanguageLearner', 'convert_weights', 'decode_spec_tokens', 'get_language_model', 'language_model_learner',
+__all__ = ['RNNLearner', 'LanguageLearner', 'convert_weights', 'decode_spec_tokens', 'get_language_model', 'language_model_learner', 
            'MultiBatchEncoder', 'get_text_classifier', 'text_classifier_learner', 'PoolingLinearClassifier']
 
-_model_meta = {AWD_LSTM: {'hid_name':'emb_sz', 'url':URLs.WT103_FWD, 'url_bwd':URLs.WT103_BWD,
+_model_meta = {AWD_LSTM: {'hid_name':'emb_sz', 'url':URLs.WT103_1,
                           'config_lm':awd_lstm_lm_config, 'split_lm': awd_lstm_lm_split,
                           'config_clas':awd_lstm_clas_config, 'split_clas': awd_lstm_clas_split},
                Transformer: {'hid_name':'d_model', 'url':URLs.OPENAI_TRANSFORMER,
                              'config_lm':tfmer_lm_config, 'split_lm': tfmer_lm_split,
                              'config_clas':tfmer_clas_config, 'split_clas': tfmer_clas_split},
-               TransformerXL: {'hid_name':'d_model',
+               TransformerXL: {'hid_name':'d_model', 
                               'config_lm':tfmerXL_lm_config, 'split_lm': tfmerXL_lm_split,
                               'config_clas':tfmerXL_clas_config, 'split_clas': tfmerXL_clas_split}}
 
@@ -46,7 +46,7 @@ class RNNLearner(Learner):
     "Basic class for a `Learner` in NLP."
     def __init__(self, data:DataBunch, model:nn.Module, split_func:OptSplitFunc=None, clip:float=None,
                  alpha:float=2., beta:float=1., metrics=None, **learn_kwargs):
-        is_class = (hasattr(data.train_ds, 'y') and (isinstance(data.train_ds.y, CategoryList) or
+        is_class = (hasattr(data.train_ds, 'y') and (isinstance(data.train_ds.y, CategoryList) or 
                                                      isinstance(data.train_ds.y, LMLabelList)))
         metrics = ifnone(metrics, ([accuracy] if is_class else []))
         super().__init__(data, model, metrics=metrics, **learn_kwargs)
@@ -56,8 +56,6 @@ class RNNLearner(Learner):
 
     def save_encoder(self, name:str):
         "Save the encoder to `name` inside the model directory."
-        if rank_distrib(): return # don't save if slave proc
-        if is_pathlike(name): self._test_writeable_path()
         encoder = get_model(self.model)[0]
         if hasattr(encoder, 'module'): encoder = encoder.module
         torch.save(encoder.state_dict(), self.path/self.model_dir/f'{name}.pth')
@@ -67,10 +65,9 @@ class RNNLearner(Learner):
         encoder = get_model(self.model)[0]
         if device is None: device = self.data.device
         if hasattr(encoder, 'module'): encoder = encoder.module
-        distrib_barrier()
+        encoder.load_state_dict(torch.load(self.path/self.model_dir/f'{name}.pth'))
         encoder.load_state_dict(torch.load(self.path/self.model_dir/f'{name}.pth', map_location=device))
         self.freeze()
-        return self
 
     def load_pretrained(self, wgts_fname:str, itos_fname:str, strict:bool=True):
         "Load a pretrained model and adapts it to the data vocabulary."
@@ -80,33 +77,32 @@ class RNNLearner(Learner):
         if 'model' in wgts: wgts = wgts['model']
         wgts = convert_weights(wgts, old_stoi, self.data.train_ds.vocab.itos)
         self.model.load_state_dict(wgts, strict=strict)
-        return self
 
-    def get_preds(self, ds_type:DatasetType=DatasetType.Valid, activ:nn.Module=None, with_loss:bool=False, n_batch:Optional[int]=None,
-                  pbar:Optional[PBar]=None, ordered:bool=True) -> List[Tensor]:
+    def get_preds(self, ds_type:DatasetType=DatasetType.Valid, with_loss:bool=False, n_batch:Optional[int]=None, pbar:Optional[PBar]=None,
+                  ordered:bool=False) -> List[Tensor]:
         "Return predictions and targets on the valid, train, or test set, depending on `ds_type`."
         self.model.reset()
         if ordered: np.random.seed(42)
-        preds = super().get_preds(ds_type=ds_type, activ=activ, with_loss=with_loss, n_batch=n_batch, pbar=pbar)
+        preds = super().get_preds(ds_type=ds_type, with_loss=with_loss, n_batch=n_batch, pbar=pbar)
         if ordered and hasattr(self.dl(ds_type), 'sampler'):
             np.random.seed(42)
             sampler = [i for i in self.dl(ds_type).sampler]
             reverse_sampler = np.argsort(sampler)
-            preds = [p[reverse_sampler] for p in preds]
-        return preds
+            preds = [p[reverse_sampler] for p in preds] 
+        return(preds)
 
 def decode_spec_tokens(tokens):
     new_toks,rule,arg = [],None,None
     for t in tokens:
         if t in [TK_MAJ, TK_UP, TK_REP, TK_WREP]: rule = t
         elif rule is None: new_toks.append(t)
-        elif rule == TK_MAJ:
+        elif rule == TK_MAJ: 
             new_toks.append(t[:1].upper() + t[1:].lower())
             rule = None
-        elif rule == TK_UP:
+        elif rule == TK_UP:  
             new_toks.append(t.upper())
             rule = None
-        elif arg is None:
+        elif arg is None: 
             try:    arg = int(t)
             except: rule = None
         else:
@@ -116,10 +112,11 @@ def decode_spec_tokens(tokens):
 
 class LanguageLearner(RNNLearner):
     "Subclass of RNNLearner for predictions."
-
+    
     def predict(self, text:str, n_words:int=1, no_unk:bool=True, temperature:float=1., min_p:float=None, sep:str=' ',
                 decoder=decode_spec_tokens):
-        "Return `text` and the `n_words` that come after"
+        "Return the `n_words` that come after `text`."
+        ds = self.data.single_dl.dataset
         self.model.reset()
         xb,yb = self.data.one_item(text)
         new_idx = []
@@ -127,7 +124,7 @@ class LanguageLearner(RNNLearner):
             res = self.pred_batch(batch=(xb,yb))[0][-1]
             #if len(new_idx) == 0: self.model[0].select_hidden([0])
             if no_unk: res[self.data.vocab.stoi[UNK]] = 0.
-            if min_p is not None:
+            if min_p is not None: 
                 if (res >= min_p).float().sum() == 0:
                     warn(f"There is no item with probability >= {min_p}, try a lower value.")
                 else: res[res < min_p] = 0.
@@ -140,10 +137,11 @@ class LanguageLearner(RNNLearner):
     def beam_search(self, text:str, n_words:int, no_unk:bool=True, top_k:int=10, beam_sz:int=1000, temperature:float=1.,
                     sep:str=' ', decoder=decode_spec_tokens):
         "Return the `n_words` that come after `text` using beam search."
+        ds = self.data.single_dl.dataset
         self.model.reset()
-        self.model.eval()
         xb, yb = self.data.one_item(text)
         nodes = None
+        xb = xb.repeat(top_k, 1)
         nodes = xb.clone()
         scores = xb.new_zeros(1).float()
         with torch.no_grad():
@@ -189,8 +187,8 @@ class LanguageLearner(RNNLearner):
 def get_language_model(arch:Callable, vocab_sz:int, config:dict=None, drop_mult:float=1.):
     "Create a language model from `arch` and its `config`, maybe `pretrained`."
     meta = _model_meta[arch]
-    config = ifnone(config, meta['config_lm']).copy()
-    for k in config.keys():
+    config = ifnone(config, meta['config_lm'].copy())
+    for k in config.keys(): 
         if k.endswith('_p'): config[k] *= drop_mult
     tie_weights,output_p,out_bias = map(config.pop, ['tie_weights', 'output_p', 'out_bias'])
     init = config.pop('init') if 'init' in config else None
@@ -206,34 +204,28 @@ def language_model_learner(data:DataBunch, arch, config:dict=None, drop_mult:flo
     model = get_language_model(arch, len(data.vocab.itos), config=config, drop_mult=drop_mult)
     meta = _model_meta[arch]
     learn = LanguageLearner(data, model, split_func=meta['split_lm'], **learn_kwargs)
-    url = 'url_bwd' if data.backwards else 'url'
-    if pretrained or pretrained_fnames:
-        if pretrained_fnames is not None:
-            fnames = [learn.path/learn.model_dir/f'{fn}.{ext}' for fn,ext in zip(pretrained_fnames, ['pth', 'pkl'])]
-        else:
-            if url not in meta:
-                warn("There are no pretrained weights for that architecture yet!")
-                return learn
-            model_path = untar_data(meta[url] , data=False)
-            fnames = [list(model_path.glob(f'*.{ext}'))[0] for ext in ['pth', 'pkl']]
-        learn = learn.load_pretrained(*fnames)
+    if pretrained:
+        if 'url' not in meta: 
+            warn("There are no pretrained weights for that architecture yet!")
+            return learn
+        model_path = untar_data(meta['url'], data=False)
+        fnames = [list(model_path.glob(f'*.{ext}'))[0] for ext in ['pth', 'pkl']]
+        learn.load_pretrained(*fnames)
+        learn.freeze()
+    if pretrained_fnames is not None:
+        fnames = [learn.path/learn.model_dir/f'{fn}.{ext}' for fn,ext in zip(pretrained_fnames, ['pth', 'pkl'])]
+        learn.load_pretrained(*fnames)
         learn.freeze()
     return learn
 
-def masked_concat_pool(outputs:Sequence[Tensor], mask:Tensor)->Tensor:
-    "Pool MultiBatchEncoder outputs into one vector [last_hidden, max_pool, avg_pool]."
-    output = outputs[-1]
-    avg_pool = output.masked_fill(mask[:, :, None], 0).mean(dim=1)
-    avg_pool *= output.size(1) / (output.size(1)-mask.type(avg_pool.dtype).sum(dim=1))[:,None]
-    max_pool = output.masked_fill(mask[:,:,None], -float('inf')).max(dim=1)[0]
-    x = torch.cat([output[:,-1], max_pool, avg_pool], 1)
-    return x
-
-class PoolingLinearClassifier(Module):
+class PoolingLinearClassifier(nn.Module):
     "Create a linear classifier with pooling."
+
     def __init__(self, layers:Collection[int], drops:Collection[float]):
+        super().__init__()
         mod_layers = []
-        if len(drops) != len(layers)-1: raise ValueError("Number of layers and dropout values do not match.")
+        if len(drops) != len(layers)-1:
+            raise ValueError("Number of layers and dropout values do not match.")
         activs = [nn.ReLU(inplace=True)] * (len(layers) - 2) + [None]
         for n_in, n_out, p, actn in zip(layers[:-1], layers[1:], drops, activs):
             mod_layers += bn_drop_lin(n_in, n_out, p=p, actn=actn)
@@ -241,23 +233,28 @@ class PoolingLinearClassifier(Module):
 
     def forward(self, input:Tuple[Tensor,Tensor, Tensor])->Tuple[Tensor,Tensor,Tensor]:
         raw_outputs,outputs,mask = input
-        x = masked_concat_pool(outputs, mask)
+        output = outputs[-1]
+        avg_pool = output.masked_fill(mask[:,:,None], 0).mean(dim=1)
+        avg_pool *= output.size(1) / (output.size(1)-mask.type(avg_pool.dtype).sum(dim=1))[:,None]
+        max_pool = output.masked_fill(mask[:,:,None], -float('inf')).max(dim=1)[0]
+        x = torch.cat([output[:,-1], max_pool, avg_pool], 1)
         x = self.layers(x)
         return x, raw_outputs, outputs
 
-class MultiBatchEncoder(Module):
+class MultiBatchEncoder(nn.Module):
     "Create an encoder over `module` that can process a full sentence."
     def __init__(self, bptt:int, max_len:int, module:nn.Module, pad_idx:int=1):
+        super().__init__()
         self.max_len,self.bptt,self.module,self.pad_idx = max_len,bptt,module,pad_idx
 
-    def concat(self, arrs:Sequence[Sequence[Tensor]])->List[Tensor]:
+    def concat(self, arrs:Collection[Tensor])->Tensor:
         "Concatenate the `arrs` along the batch dimension."
         return [torch.cat([l[si] for l in arrs], dim=1) for si in range_of(arrs[0])]
-
-    def reset(self):
+    
+    def reset(self): 
         if hasattr(self.module, 'reset'): self.module.reset()
 
-    def forward(self, input:LongTensor)->Tuple[List[Tensor],List[Tensor],Tensor]:
+    def forward(self, input:LongTensor)->Tuple[Tensor,Tensor]:
         bs,sl = input.size()
         self.reset()
         raw_outputs,outputs,masks = [],[],[]
@@ -268,14 +265,14 @@ class MultiBatchEncoder(Module):
                 raw_outputs.append(r)
                 outputs.append(o)
         return self.concat(raw_outputs),self.concat(outputs),torch.cat(masks,dim=1)
-
-def get_text_classifier(arch:Callable, vocab_sz:int, n_class:int, bptt:int=70, max_len:int=20*70, config:dict=None,
+    
+def get_text_classifier(arch:Callable, vocab_sz:int, n_class:int, bptt:int=70, max_len:int=20*70, config:dict=None, 
                         drop_mult:float=1., lin_ftrs:Collection[int]=None, ps:Collection[float]=None,
                         pad_idx:int=1) -> nn.Module:
     "Create a text classifier from `arch` and its `config`, maybe `pretrained`."
     meta = _model_meta[arch]
-    config = ifnone(config, meta['config_clas']).copy()
-    for k in config.keys():
+    config = ifnone(config, meta['config_clas'].copy())
+    for k in config.keys(): 
         if k.endswith('_p'): config[k] *= drop_mult
     if lin_ftrs is None: lin_ftrs = [50]
     if ps is None:  ps = [0.1]*len(lin_ftrs)
@@ -286,8 +283,8 @@ def get_text_classifier(arch:Callable, vocab_sz:int, n_class:int, bptt:int=70, m
     model = SequentialRNN(encoder, PoolingLinearClassifier(layers, ps))
     return model if init is None else model.apply(init)
 
-def text_classifier_learner(data:DataBunch, arch:Callable, bptt:int=70, max_len:int=70*20, config:dict=None,
-                            pretrained:bool=True, drop_mult:float=1., lin_ftrs:Collection[int]=None,
+def text_classifier_learner(data:DataBunch, arch:Callable, bptt:int=70, max_len:int=70*20, config:dict=None, 
+                            pretrained:bool=True, drop_mult:float=1., lin_ftrs:Collection[int]=None, 
                             ps:Collection[float]=None, **learn_kwargs) -> 'TextClassifierLearner':
     "Create a `Learner` with a text classifier from `data` and `arch`."
     model = get_text_classifier(arch, len(data.vocab.itos), data.c, bptt=bptt, max_len=max_len,
@@ -295,11 +292,11 @@ def text_classifier_learner(data:DataBunch, arch:Callable, bptt:int=70, max_len:
     meta = _model_meta[arch]
     learn = RNNLearner(data, model, split_func=meta['split_clas'], **learn_kwargs)
     if pretrained:
-        if 'url' not in meta:
+        if 'url' not in meta: 
             warn("There are no pretrained weights for that architecture yet!")
             return learn
         model_path = untar_data(meta['url'], data=False)
         fnames = [list(model_path.glob(f'*.{ext}'))[0] for ext in ['pth', 'pkl']]
-        learn = learn.load_pretrained(*fnames, strict=False)
+        learn.load_pretrained(*fnames, strict=False)
         learn.freeze()
     return learn

@@ -2,9 +2,10 @@
 from .basic_data import *
 from .torch_core import *
 import torch.distributed as dist
+import traceback
 
 __all__ = ['AverageMetric', 'Callback', 'CallbackHandler', 'OptimWrapper', 'SmoothenValue', 'Scheduler', 'annealing_cos', 'CallbackList',
-           'annealing_exp', 'annealing_linear', 'annealing_no', 'annealing_poly']
+           'annealing_exp', 'annealing_linear', 'annealing_no', 'annealing_poly','annealing_step_function']
 
 class OptimWrapper():
     "Basic wrapper around `opt` to simplify hyper-parameters changes."
@@ -272,37 +273,37 @@ class CallbackHandler():
         self.state_dict['num_batch'],self.state_dict['stop_training'] = 0,False
         self('epoch_begin')
 
-    def on_batch_begin(self, xb:Tensor, yb:Tensor, train:bool=True)->Tuple[Any,Any]:
+    def on_batch_begin(self, xb:Tensor, yb:Tensor, train:bool=True)->None:
         "Handle new batch `xb`,`yb` in `train` or validation."
         self.state_dict.update(dict(last_input=xb, last_target=yb, train=train, 
             stop_epoch=False, skip_step=False, skip_zero=False, skip_bwd=False))
-        self('batch_begin', call_mets = not self.state_dict['train'])
+        self('batch_begin', mets = not self.state_dict['train'])
         return self.state_dict['last_input'], self.state_dict['last_target']
 
-    def on_loss_begin(self, out:Tensor)->Any:
+    def on_loss_begin(self, out:Tensor)->None:
         "Handle start of loss calculation with model output `out`."
         self.state_dict['last_output'] = out
         self('loss_begin', call_mets=False)
         return self.state_dict['last_output']
 
-    def on_backward_begin(self, loss:Tensor)->Tuple[Any,Any]:
+    def on_backward_begin(self, loss:Tensor)->None:
         "Handle gradient calculation on `loss`."
-        self.smoothener.add_value(loss.float().detach().cpu())
+        self.smoothener.add_value(loss.detach().cpu())
         self.state_dict['last_loss'], self.state_dict['smooth_loss'] = loss, self.smoothener.smooth
         self('backward_begin', call_mets=False)
         return self.state_dict['last_loss'], self.state_dict['skip_bwd']
 
-    def on_backward_end(self)->Any:
+    def on_backward_end(self)->None:
         "Handle end of gradient calculation."
         self('backward_end', call_mets=False)
         return self.state_dict['skip_step']
 
-    def on_step_end(self)->Any:
+    def on_step_end(self)->None:
         "Handle end of optimization step."
         self('step_end', call_mets=False)
         return self.state_dict['skip_zero']
 
-    def on_batch_end(self, loss:Tensor)->Any:
+    def on_batch_end(self, loss:Tensor)->None:
         "Handle end of processing one batch with `loss`."
         self.state_dict['last_loss'] = loss
         self('batch_end', call_mets = not self.state_dict['train'])
@@ -352,6 +353,19 @@ class AverageMetric(Callback):
         "Set the final result in `last_metrics`."
         return add_metrics(last_metrics, self.val/self.count)
 
+def annealing_step_function(start:Number, end:Number, pct:float)->Number:
+    if (pct<0.4):return start
+    if (0.4<=pct<=0.7):return start/10.0
+    if (pct>0.7):return start/100.0
+    
+    # if (pct<0.25):return start
+    # if (0.25<=pct<=0.5):return start/10.0
+    # if (0.5<pct<=0.75):return start/100.0
+    # if (pct>0.75):return start/1000.0
+    
+    # if (pct<0.5):return start
+    # if (pct>=0.5):return start/10.0
+   
 def annealing_no(start:Number, end:Number, pct:float)->Number:
     "No annealing, always return `start`."
     return start
@@ -365,7 +379,6 @@ def annealing_cos(start:Number, end:Number, pct:float)->Number:
     "Cosine anneal from `start` to `end` as pct goes from 0.0 to 1.0."
     cos_out = np.cos(np.pi * pct) + 1
     return end + (start-end)/2 * cos_out
-
 def do_annealing_poly(start:Number, end:Number, pct:float, degree:Number)->Number:
     "Helper function for `anneal_poly`."
     return end + (start-end) * (1-pct)**degree
@@ -378,9 +391,9 @@ class Scheduler():
     def __init__(self, vals:StartOptEnd, n_iter:int, func:Optional[AnnealFunc]=None):
         self.start,self.end = (vals[0],vals[1]) if is_tuple(vals) else (vals,0)
         self.n_iter = max(1,n_iter)
-        if func is None: self.func = annealing_linear if is_tuple(vals) else annealing_no
-        else:          self.func = func
-        self.n = 0
+        if func is None:    self.func = annealing_linear if is_tuple(vals) else annealing_no
+        else:               self.func = func
+        self.n= 0
         
     def restart(self): self.n = 0
 

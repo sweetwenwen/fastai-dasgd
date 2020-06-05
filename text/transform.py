@@ -91,7 +91,7 @@ class Tokenizer():
         self.tok_func,self.lang,self.special_cases = tok_func,lang,special_cases
         self.pre_rules  = ifnone(pre_rules,  defaults.text_pre_rules )
         self.post_rules = ifnone(post_rules, defaults.text_post_rules)
-        self.special_cases = special_cases if special_cases is not None else defaults.text_spec_tok
+        self.special_cases = special_cases if special_cases else defaults.text_spec_tok
         self.n_cpus = ifnone(n_cpus, defaults.cpus)
 
     def __repr__(self) -> str:
@@ -142,7 +142,6 @@ class Vocab():
 
     def save(self, path):
         "Save `self.itos` in `path`"
-        if rank_distrib(): return # don't save if slave proc
         pickle.dump(self.itos, open(path, 'wb'))
 
     @classmethod
@@ -153,9 +152,6 @@ class Vocab():
         for o in reversed(defaults.text_spec_tok):
             if o in itos: itos.remove(o)
             itos.insert(0, o)
-        itos = itos[:max_vocab]
-        if len(itos) < max_vocab: #Make sure vocab size is a multiple of 8 for fast mixed precision training
-            while len(itos)%8 !=0: itos.append('xxfake')
         return cls(itos)
     
     @classmethod

@@ -7,7 +7,7 @@ from .utils.ipython import gpu_mem_restore
 import inspect
 from fastprogress.fastprogress import format_time, IN_NOTEBOOK
 from time import time
-from .sixel import plot_sixel
+from fastai.sixel import plot_sixel
 
 __all__ = ['Learner', 'LearnerCallback', 'Recorder', 'RecordOnCPU', 'fit', 'loss_batch', 'train_epoch', 'validate',
            'get_preds', 'load_learner']
@@ -18,11 +18,13 @@ defaults.extra_callbacks    = None
 defaults.extra_callback_fns = None
 
 def loss_batch(model:nn.Module, xb:Tensor, yb:Tensor, loss_func:OptLossFunc=None, opt:OptOptimizer=None,
-               cb_handler:Optional[CallbackHandler]=None)->Tuple[Union[Tensor,int,float,str]]:
+               cb_handler:Optional[CallbackHandler]=None,cuda_number:Optional[int]=None)->Tuple[Union[Tensor,int,float,str]]:
     "Calculate loss and metrics for a batch, call out to callbacks as necessary."
+    if cuda_number is not None: torch.cuda.set_device(cuda_number)
     cb_handler = ifnone(cb_handler, CallbackHandler())
     if not is_listy(xb): xb = [xb]
     if not is_listy(yb): yb = [yb]
+    # out = model(*xb).to(cuda_number)
     out = model(*xb)
     out = cb_handler.on_loss_begin(out)
 
@@ -30,11 +32,10 @@ def loss_batch(model:nn.Module, xb:Tensor, yb:Tensor, loss_func:OptLossFunc=None
     loss = loss_func(out, *yb)
 
     if opt is not None:
-        loss,skip_bwd = cb_handler.on_backward_begin(loss)
-        if not skip_bwd:                     loss.backward()
-        if not cb_handler.on_backward_end(): opt.step()
-        if not cb_handler.on_step_end():     opt.zero_grad()
-
+        loss, skip_bwd = cb_handler.on_backward_begin(loss)
+        if not skip_bwd:                        loss.backward()
+        if not cb_handler.on_backward_end():    opt.step()
+        if not cb_handler.on_step_end():        opt.zero_grad()
     return loss.detach().cpu()
 
 def get_preds(model:nn.Module, dl:DataLoader, pbar:Optional[PBar]=None, cb_handler:Optional[CallbackHandler]=None,
@@ -47,14 +48,18 @@ def get_preds(model:nn.Module, dl:DataLoader, pbar:Optional[PBar]=None, cb_handl
     if activ is not None: res[0] = activ(res[0])
     return res
 
+
+
+
 def validate(model:nn.Module, dl:DataLoader, loss_func:OptLossFunc=None, cb_handler:Optional[CallbackHandler]=None,
-             pbar:Optional[PBar]=None, average=True, n_batch:Optional[int]=None)->Iterator[Tuple[Union[Tensor,int],...]]:
+             pbar:Optional[PBar]=None, average=True, n_batch:Optional[int]=None, cuda_number:Optional[int]=None)->Iterator[Tuple[Union[Tensor,int],...]]:
     "Calculate `loss_func` of `model` on `dl` in evaluation mode."
     model.eval()
+    if cuda_number is not None: torch.cuda.set_device(cuda_number)
     with torch.no_grad():
         val_losses,nums = [],[]
         if cb_handler: cb_handler.set_dl(dl)
-        for xb,yb in progress_bar(dl, parent=pbar, leave=(pbar is not None)):
+        for xb, yb in progress_bar(dl, parent=pbar, leave=(pbar is not None)):
             if cb_handler: xb, yb = cb_handler.on_batch_begin(xb, yb, train=False)
             val_loss = loss_batch(model, xb, yb, loss_func, cb_handler=cb_handler)
             val_losses.append(val_loss)
@@ -63,8 +68,11 @@ def validate(model:nn.Module, dl:DataLoader, loss_func:OptLossFunc=None, cb_hand
             if cb_handler and cb_handler.on_batch_end(val_losses[-1]): break
             if n_batch and (len(nums)>=n_batch): break
         nums = np.array(nums, dtype=np.float32)
-        if average: return (to_np(torch.stack(val_losses)) * nums).sum() / nums.sum()
-        else:       return val_losses
+        if average:
+            return (to_np(torch.stack(val_losses)) * nums).sum() / nums.sum()
+        else:       return to_np(val_loss)
+
+       
 
 def train_epoch(model:nn.Module, dl:DataLoader, opt:optim.Optimizer, loss_func:LossFunction)->None:
     "Simple training of `model` for 1 epoch of `dl` using optim `opt` and loss function `loss_func`."
@@ -84,28 +92,27 @@ class BasicLearner():
 
 def fit(epochs:int, learn:BasicLearner, callbacks:Optional[CallbackList]=None, metrics:OptMetrics=None)->None:
     "Fit the `model` on `data` and learn using `loss_func` and `opt`."
-    assert len(learn.data.train_dl) != 0, f"""Your training dataloader is empty, can't train a model.
-        Use a smaller batch size (batch size={learn.data.train_dl.batch_size} for {len(learn.data.train_dl.dataset)} elements)."""
+    assert len(learn.data.train_dl) != 0, f"""Your training dataloader is empty, can't train a model. Use a smaller batch size (batch size={learn.data.train_dl.batch_size} for {len(learn.data.train_dl.dataset)} elements)."""
     cb_handler = CallbackHandler(callbacks, metrics)
     pbar = master_bar(range(epochs))
-    cb_handler.on_train_begin(epochs, pbar=pbar, metrics=metrics)
-
+    cb_handler.on_train_begin(epochs, pbar=pbar, metrics=metrics)  
     exception=False
     try:
         for epoch in pbar:
             learn.model.train()
             cb_handler.set_dl(learn.data.train_dl)
             cb_handler.on_epoch_begin()
-            for xb,yb in progress_bar(learn.data.train_dl, parent=pbar):
+            for xb, yb in progress_bar(learn.data.train_dl, parent=pbar):
                 xb, yb = cb_handler.on_batch_begin(xb, yb)
                 loss = loss_batch(learn.model, xb, yb, learn.loss_func, learn.opt, cb_handler)
                 if cb_handler.on_batch_end(loss): break
-
+                
             if not cb_handler.skip_validate and not learn.data.empty_val:
-                val_loss = validate(learn.model, learn.data.valid_dl, loss_func=learn.loss_func,
-                                       cb_handler=cb_handler, pbar=pbar)
+                val_loss = validate(learn.model, learn.data.valid_dl, loss_func=learn.loss_func, cb_handler=cb_handler, pbar=pbar)
+                
             else: val_loss=None
             if cb_handler.on_epoch_end(val_loss): break
+            
     except Exception as e:
         exception = e
         raise
@@ -159,6 +166,9 @@ class Learner():
     layer_groups:Collection[nn.Module]=None
     add_time:bool=True
     silent:bool=None
+    model_number:Optional[int]=1
+    tao:Optional[int]=1
+        
     def __post_init__(self)->None:
         "Setup path,metrics, callbacks and ensure model directory exists."
         self.path = Path(ifnone(self.path, self.data.path))
@@ -265,7 +275,7 @@ class Learner():
         if device is None: device = self.data.device
         elif isinstance(device, int): device = torch.device('cuda', device)
         source = self.path/self.model_dir/f'{file}.pth' if is_pathlike(file) else file
-        distrib_barrier()
+        # distrib_barrier()
         state = torch.load(source, map_location=device)
         if set(state.keys()) == {'model', 'opt'}:
             model_state = state['model']

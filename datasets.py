@@ -31,12 +31,12 @@ class URLs():
     MNIST_VAR_SIZE_TINY = f'{S3_IMAGE}mnist_var_size_tiny'
     PLANET_SAMPLE       = f'{URL}planet_sample'
     PLANET_TINY         = f'{URL}planet_tiny'
-    IMAGENETTE          = f'{S3_IMAGE}imagenette2'
-    IMAGENETTE_160      = f'{S3_IMAGE}imagenette2-160'
-    IMAGENETTE_320      = f'{S3_IMAGE}imagenette2-320'
-    IMAGEWOOF           = f'{S3_IMAGE}imagewoof2'
-    IMAGEWOOF_160       = f'{S3_IMAGE}imagewoof2-160'
-    IMAGEWOOF_320       = f'{S3_IMAGE}imagewoof2-320'
+    IMAGENETTE          = f'{S3_IMAGE}imagenette'
+    IMAGENETTE_160      = f'{S3_IMAGE}imagenette-160'
+    IMAGENETTE_320      = f'{S3_IMAGE}imagenette-320'
+    IMAGEWOOF           = f'{S3_IMAGE}imagewoof'
+    IMAGEWOOF_160       = f'{S3_IMAGE}imagewoof-160'
+    IMAGEWOOF_320       = f'{S3_IMAGE}imagewoof-320'
 
     # kaggle competitions download dogs-vs-cats -p {DOGS.absolute()}
     DOGS = f'{URL}dogscats'
@@ -74,8 +74,8 @@ class URLs():
 
     #Pretrained models
     OPENAI_TRANSFORMER = f'{S3_MODEL}transformer'
-    WT103_FWD          = f'{S3_MODEL}wt103-fwd'
-    WT103_BWD          = f'{S3_MODEL}wt103-bwd'
+    WT103               = f'{S3_MODEL}wt103'
+    WT103_1             = f'{S3_MODEL}wt103-1'
 
 # to create/update a checksum for ./mnist_var_size_tiny.tgz, run:
 # python -c 'import fastai.datasets; print(fastai.datasets._check_file("mnist_var_size_tiny.tgz"))'
@@ -118,8 +118,8 @@ _checks = {
     URLs.SOGOU_NEWS:(384269937, '950f1366d33be52f5b944f8a8b680902'),
     URLs.WIKITEXT:(190200704, '2dd8cf8693b3d27e9c8f0a7df054b2c7'),
     URLs.WIKITEXT_TINY:(4070055, '2a82d47a7b85c8b6a8e068dc4c1d37e7'),
-    URLs.WT103_FWD:(105067061, '7d1114cd9684bf9d1ca3c9f6a54da6f9'),
-    URLs.WT103_BWD:(105205312, '20b06f5830fd5a891d21044c28d3097f'),
+    URLs.WT103:(206789489, '76fd08236c78bf91b7fb76698d53afa3'),
+    URLs.WT103_1:(165175630, '9cbe02e9e23b969fee10dc9b8dec6566'),
     URLs.YAHOO_ANSWERS:(319476345, '0632a0d236ef3a529c0fa4429b339f68'),
     URLs.YELP_REVIEWS_POLARITY:(166373201, '48c8451c1ad30472334d856b5d294807'),
     URLs.YELP_REVIEWS:(196146755, '1efd84215ea3e30d90e4c33764b889db'),

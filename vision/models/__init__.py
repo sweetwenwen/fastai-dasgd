@@ -8,3 +8,9 @@ from .unet import *
 from .wrn import *
 from .xception import *
 from .densenet import *
+from .vgg import *
+from .googlenet import *
+from .mobilenetv2 import *
+from .resnext import *
+from .dpn import *
+from .shufflenetv2 import *

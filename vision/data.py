@@ -76,7 +76,7 @@ def normalize_funcs(mean:FloatTensor, std:FloatTensor, do_x:bool=True, do_y:bool
 
 cifar_stats = ([0.491, 0.482, 0.447], [0.247, 0.243, 0.261])
 imagenet_stats = ([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-mnist_stats = ([0.131], [0.308])
+mnist_stats = ([0.15]*3, [0.15]*3)
 
 def channel_view(x:Tensor)->Tensor:
     "Make channel the first axis of `x` and flatten remaining axes"
@@ -85,7 +85,6 @@ def channel_view(x:Tensor)->Tensor:
 class ImageDataBunch(DataBunch):
     "DataBunch suitable for computer vision."
     _square_show = True
-
     @classmethod
     def create_from_ll(cls, lls:LabelLists, bs:int=64, val_bs:int=None, ds_tfms:Optional[TfmList]=None,
                 num_workers:int=defaults.cpus, dl_tfms:Optional[Collection[Callable]]=None, device:torch.device=None,
@@ -100,50 +99,49 @@ class ImageDataBunch(DataBunch):
                              device=device, no_check=no_check)
 
     @classmethod
-    def from_folder(cls, path:PathOrStr, train:PathOrStr='train', valid:PathOrStr='valid', test:Optional[PathOrStr]=None,
-                    valid_pct=None, seed:int=None, classes:Collection=None, **kwargs:Any)->'ImageDataBunch':
+    def from_folder(cls, path:PathOrStr, train:PathOrStr='train', valid:PathOrStr='valid',
+                    valid_pct=None, classes:Collection=None, **kwargs:Any)->'ImageDataBunch':
         "Create from imagenet style dataset in `path` with `train`,`valid`,`test` subfolders (or provide `valid_pct`)."
         path=Path(path)
-        il = ImageList.from_folder(path, exclude=test)
+        il = ImageList.from_folder(path)
         if valid_pct is None: src = il.split_by_folder(train=train, valid=valid)
-        else: src = il.split_by_rand_pct(valid_pct, seed)
+        else: src = il.split_by_rand_pct(valid_pct)
         src = src.label_from_folder(classes=classes)
-        return cls.create_from_ll(src, test=test, **kwargs)
+        return cls.create_from_ll(src, **kwargs)
 
     @classmethod
     def from_df(cls, path:PathOrStr, df:pd.DataFrame, folder:PathOrStr=None, label_delim:str=None, valid_pct:float=0.2,
-                seed:int=None, fn_col:IntsOrStrs=0, label_col:IntsOrStrs=1, suffix:str='', **kwargs:Any)->'ImageDataBunch':
+                fn_col:IntsOrStrs=0, label_col:IntsOrStrs=1, suffix:str='', **kwargs:Any)->'ImageDataBunch':
         "Create from a `DataFrame` `df`."
         src = (ImageList.from_df(df, path=path, folder=folder, suffix=suffix, cols=fn_col)
-                .split_by_rand_pct(valid_pct, seed)
+                .split_by_rand_pct(valid_pct)
                 .label_from_df(label_delim=label_delim, cols=label_col))
         return cls.create_from_ll(src, **kwargs)
 
     @classmethod
     def from_csv(cls, path:PathOrStr, folder:PathOrStr=None, label_delim:str=None, csv_labels:PathOrStr='labels.csv',
-                 valid_pct:float=0.2, seed:int=None, fn_col:int=0, label_col:int=1, suffix:str='', delimiter:str=None,
+                 valid_pct:float=0.2, fn_col:int=0, label_col:int=1, suffix:str='', delimiter:str=None,
                  header:Optional[Union[int,str]]='infer', **kwargs:Any)->'ImageDataBunch':
         "Create from a csv file in `path/csv_labels`."
         path = Path(path)
         df = pd.read_csv(path/csv_labels, header=header, delimiter=delimiter)
-        return cls.from_df(path, df, folder=folder, label_delim=label_delim, valid_pct=valid_pct, seed=seed,
+        return cls.from_df(path, df, folder=folder, label_delim=label_delim, valid_pct=valid_pct,
                 fn_col=fn_col, label_col=label_col, suffix=suffix, **kwargs)
 
     @classmethod
-    def from_lists(cls, path:PathOrStr, fnames:FilePathList, labels:Collection[str], valid_pct:float=0.2, seed:int=None,
+    def from_lists(cls, path:PathOrStr, fnames:FilePathList, labels:Collection[str], valid_pct:float=0.2,
                    item_cls:Callable=None, **kwargs):
         "Create from list of `fnames` in `path`."
         item_cls = ifnone(item_cls, ImageList)
         fname2label = {f:l for (f,l) in zip(fnames, labels)}
-        src = (item_cls(fnames, path=path).split_by_rand_pct(valid_pct, seed)
+        src = (item_cls(fnames, path=path).split_by_rand_pct(valid_pct)
                                 .label_from_func(lambda x:fname2label[x]))
         return cls.create_from_ll(src, **kwargs)
 
     @classmethod
-    def from_name_func(cls, path:PathOrStr, fnames:FilePathList, label_func:Callable, valid_pct:float=0.2, seed:int=None,
-                       **kwargs):
+    def from_name_func(cls, path:PathOrStr, fnames:FilePathList, label_func:Callable, valid_pct:float=0.2, **kwargs):
         "Create from list of `fnames` in `path` with `label_func`."
-        src = ImageList(fnames, path=path).split_by_rand_pct(valid_pct, seed)
+        src = ImageList(fnames, path=path).split_by_rand_pct(valid_pct)
         return cls.create_from_ll(src.label_from_func(label_func), **kwargs)
 
     @classmethod
@@ -189,7 +187,7 @@ def _download_image_inner(dest, url, i, timeout=4):
     suffix = suffix[0] if len(suffix)>0  else '.jpg'
     download_image(url, dest/f"{i:08d}{suffix}", timeout=timeout)
 
-def download_images(urls:Union[Path, str], dest:PathOrStr, max_pics:int=1000, max_workers:int=8, timeout=4):
+def download_images(urls:Collection[str], dest:PathOrStr, max_pics:int=1000, max_workers:int=8, timeout=4):
     "Download images listed in text file `urls` to path `dest`, at most `max_pics`"
     urls = open(urls).read().strip().split("\n")[:max_pics]
     dest = Path(dest)
@@ -259,7 +257,7 @@ class ImageList(ItemList):
     def __init__(self, *args, convert_mode='RGB', after_open:Callable=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.convert_mode,self.after_open = convert_mode,after_open
-        self.copy_new += ['convert_mode', 'after_open']
+        self.copy_new.append('convert_mode')
         self.c,self.sizes = 3,{}
 
     def open(self, fn):
@@ -289,10 +287,10 @@ class ImageList(ItemList):
         return res
 
     @classmethod
-    def from_csv(cls, path:PathOrStr, csv_name:str, header:str='infer', delimiter:str=None, **kwargs)->'ItemList':
+    def from_csv(cls, path:PathOrStr, csv_name:str, header:str='infer', **kwargs)->'ItemList':
         "Get the filenames in `path/csv_name` opened with `header`."
         path = Path(path)
-        df = pd.read_csv(path/csv_name, header=header, delimiter=delimiter)
+        df = pd.read_csv(path/csv_name, header=header)
         return cls.from_df(df, path=path, **kwargs)
 
     def reconstruct(self, t:Tensor): return Image(t.float().clamp(min=0,max=1))
@@ -380,7 +378,7 @@ class SegmentationLabelList(ImageList):
         self.copy_new.append('classes')
         self.classes,self.loss_func = classes,CrossEntropyFlat(axis=1)
 
-    def open(self, fn): return open_mask(fn, after_open=self.after_open)
+    def open(self, fn): return open_mask(fn)
     def analyze_pred(self, pred, thresh:float=0.5): return pred.argmax(dim=0)[None]
     def reconstruct(self, t:Tensor): return ImageSegment(t)
 
@@ -396,9 +394,8 @@ class PointsProcessor(PreProcessor):
 class PointsLabelList(ItemList):
     "`ItemList` for points."
     _processor = PointsProcessor
-    def __init__(self, items:Iterator, **kwargs):
-        super().__init__(items, **kwargs)
-        self.loss_func = MSELossFlat()
+
+    def __post_init__(self): self.loss_func = MSELossFlat()
 
     def get(self, i):
         o = super().get(i)

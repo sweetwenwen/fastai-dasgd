@@ -4,13 +4,324 @@ from .callback import *
 from .callbacks import *
 from .basic_data import *
 from .basic_train import *
+from collections import OrderedDict
+import math
 
-__all__ = ['BnFreeze', 'GradientClipping', 'ShowGraph', 'Interpretation', 'ClassificationInterpretation', 'MultiLabelClassificationInterpretation',
- 'fit_one_cycle', 'lr_find', 'one_cycle_scheduler', 'to_fp16', 'to_fp32', 'mixup', 'AccumulateScheduler', 'fit_fc']
+__all__ = ['BnFreeze', 'GradientClipping', 'ShowGraph', 'Interpretation', 'ClassificationInterpretation', 'MultiLabelClassificationInterpretation', 'fit_one_cycle', 'lr_find', 'one_cycle_scheduler', 'fit_asynchronous_average_models_one_cycle', 'fit_one_cycle_models_trasformer','fit_average_models_one_cycle', 'to_fp16', 'to_fp32', 'mixup', 'AccumulateScheduler', 'fit_fc']
 
 def one_cycle_scheduler(lr_max:float, **kwargs:Any)->OneCycleScheduler:
     "Instantiate a `OneCycleScheduler` with `lr_max`."
     return partial(OneCycleScheduler, lr_max=lr_max, **kwargs)
+
+def fit_one_cycle_models_trasformer(learners:Learner, epochs:int, lr:Union[Floats,slice]=defaults.lr, moms:Tuple[float,float]=(0.9,0.9), div_factor:float=25., pct_start:float=0.3, final_div:float=None, wd:float=None, callbacks:Optional[CallbackList]=None, tot_epochs:int=None, start_epoch:int=None, metrics:OptMetrics=None, model_number:int=None, tao:int=None, delay:int=None, update_proportion:int=None, number_gpu:int=None)->None:
+    pbar = master_bar(range(epochs))
+    learn_list = {}
+    lr_list = {}
+    callbacks_list = {}
+    wd_list = {}
+    cb_handler_list = {}
+    metrics_list = {}
+    xb_list = {}
+    yb_list = {}
+    loss_list = {}
+    val_loss_list = {}
+    new_dict_list = {}
+    i = 0
+    model_average_tag = 0
+
+    for learn in learners:
+        learn_list['obj'+str(i)] = learn
+        learn_list['obj'+str(i)].model.cuda(int(i%number_gpu))
+        metrics_list['obj'+str(i)] = metrics
+        lr_list['obj'+str(i)] = learn_list['obj'+str(i)].lr_range(lr)
+        callbacks_list['obj'+str(i)] = listify(callbacks)
+        callbacks_list['obj'+str(i)].append(OneCycleScheduler(learn_list['obj'+str(i)], lr_list['obj'+str(i)], moms=moms, div_factor=div_factor, pct_start=pct_start, final_div=final_div, tot_epochs=tot_epochs, start_epoch=start_epoch, tao=tao))
+        if wd is None:  wd_list['obj'+str(i)] = learn_list['obj'+str(i)].wd
+        if not getattr(learn_list['obj'+str(i)], 'opt', False):  learn_list['obj'+str(i)].create_opt(lr_list['obj'+str(i)], wd)
+        else: learn_list['obj'+str(i)].opt.lr, learn_list['obj'+str(i)].opt.wd = lr_list['obj'+str(i)], wd
+        learn_list['obj'+str(i)].opt.wd = wd
+        callbacks_list['obj'+str(i)] = [cb(learn_list['obj'+str(i)]) for cb in learn_list['obj'+str(i)].callback_fns + listify(defaults.extra_callback_fns)] + listify(callbacks_list['obj'+str(i)])
+        assert len(learn_list['obj'+str(i)].data.train_dl) != 0, f"""Your training dataloader is empty, can't train a model. Use a smaller batch size (batch size={learn.data.train_dl.batch_size} for {len(learn.data.train_dl.dataset)} elements)."""
+        cb_handler_list['obj'+str(i)] = CallbackHandler(callbacks_list['obj'+str(i)], metrics_list['obj'+str(i)])
+        cb_handler_list['obj'+str(i)].on_train_begin(epochs, pbar=pbar, metrics=metrics_list['obj'+str(i)])
+        i = i+1
+                
+    exception=False
+    try:
+        for epoch in pbar:
+            for i in range(model_number):
+                learn_list['obj'+str(i)].model.train().cuda(int(i%number_gpu))                
+                cb_handler_list['obj'+str(i)].set_dl(learn_list['obj'+str(i)].data.train_dl)
+                cb_handler_list['obj'+str(i)].on_epoch_begin()
+
+            # training models + local steps tao
+            for xb, yb in progress_bar(learn_list['obj0'].data.train_dl, parent=pbar):
+                # print( learn_list['obj'+str(i)].opt)
+                split_xb_0 = xb[0].split(math.ceil(xb[0].size()[0]/model_number/tao),0)
+                split_xb_1 = xb[1].split(math.ceil(xb[1].size()[0]/model_number/tao),0)
+                split_yb = yb.split(math.ceil(yb.size()[0]/model_number/tao),0)
+
+                for local_step in range(tao):
+                    for i in range(model_number):
+                        device_id = i%number_gpu
+                        xb_list['obj'+str(i)] = [split_xb_0[local_step*model_number+i].cuda(device_id), split_xb_1[local_step*model_number+i].cuda(device_id)]
+                        yb_list['obj'+str(i)] = split_yb[local_step*model_number+i].cuda(device_id)
+                        learn_list['obj'+str(i)].model.cuda(device_id)
+
+                        xb_list['obj'+str(i)], yb_list['obj'+str(i)] = cb_handler_list['obj'+str(i)].on_batch_begin(xb_list['obj'+str(i)], yb_list['obj'+str(i)])
+
+                        loss_list['obj'+str(i)] = loss_batch(learn_list['obj'+str(i)].model, xb_list['obj'+str(i)], yb_list['obj'+str(i)], learn_list['obj'+str(i)].loss_func, learn_list['obj'+str(i)].opt, cb_handler_list['obj'+str(i)], cuda_number=i%number_gpu)
+                    # if cb_handler_list['obj'+str(i)].on_batch_end(loss_list['obj'+str(i)]):  break
+                        cb_handler_list['obj'+str(i)].on_batch_end(loss_list['obj'+str(i)])
+
+                        if (local_step == (delay-1) and model_average_tag):
+                            new_dict_list['obj'+str(i)] = OrderedDict()
+                            for k, v in learn_list['obj'+str(i)].model.state_dict().items():
+                                _k = k
+                                new_dict_list['obj'+str(i)][_k] = v
+                                if 'weight' in k or 'bias' in k:
+                                    for k2, v2 in new_dict.items():
+                                        if (k == k2):
+                                            new_dict_list['obj'+str(i)][_k] = torch.cuda.comm.reduce_add([update_proportion * new_dict_list['obj'+str(i)][_k] , (1 - update_proportion) * new_dict[_k]] , destination = i%number_gpu)
+
+                            learn_list['obj'+str(i)].model.load_state_dict(new_dict_list['obj'+str(i)])
+
+                ## average models need to use add tree
+                model_average_tag = 1
+                new_dict = OrderedDict()
+                learn_list['obj0'].model.cuda(0)
+                for k, v in learn_list['obj0'].model.state_dict().items():
+                    _k = k
+                    new_dict[_k] = v
+                    if 'weight' in k or 'bias' in k:
+                        for i in range(1, model_number):
+                            for k2, v2 in learn_list['obj'+str(i)].model.state_dict().items():
+                                if (k == k2):
+                                    new_dict[_k] = torch.cuda.comm.reduce_add([new_dict[_k], v2], destination = 0)
+                        new_dict[_k]  = new_dict[_k]/model_number
+                if (delay == 0):
+                    new_dict_list['obj'+str(i)] = OrderedDict()
+                    for k, v in learn_list['obj'+str(i)].model.state_dict().items():
+                        _k = k
+                        new_dict_list['obj'+str(i)][_k] = v
+                        if 'weight' in k or 'bias' in k:
+                            for k2, v2 in new_dict.items():
+                                if (k == k2):
+                                    new_dict_list['obj'+str(i)][_k] = update_proportion * new_dict_list['obj'+str(i)][_k] + (1 - update_proportion) * new_dict[_k]
+                    learn_list['obj'+str(i)].model.load_state_dict(new_dict_list['obj'+str(i)])
+
+            # validate models
+            # for i in range(model_number):
+            i = 0
+            if (i==0):
+                learn_list['obj'+str(i)].model.cuda(i%number_gpu)
+                if not cb_handler_list['obj'+str(i)].skip_validate and not learn_list['obj'+str(i)].data.empty_val:
+                    val_loss_list['obj'+str(i)] = validate(learn_list['obj'+str(i)].model, learn_list['obj'+str(i)].data.valid_dl, loss_func=learn_list['obj'+str(i)].loss_func, pbar=pbar, cb_handler=cb_handler_list['obj'+str(i)],  cuda_number=i%number_gpu)
+                else: val_loss_list['obj'+str(i)]=None
+                cb_handler_list['obj'+str(i)].on_epoch_end(val_loss_list['obj'+str(i)])
+
+    except Exception as e:
+        exception = e
+        raise
+    finally:
+        for i in range(model_number): cb_handler_list['obj'+str(i)].on_train_end(exception)
+
+
+def fit_asynchronous_average_models_one_cycle(learners:Learner, epochs:int, lr:Union[Floats,slice]=defaults.lr, moms:Tuple[float,float]=(0.9,0.9), div_factor:float=25., pct_start:float=0.3, final_div:float=None, wd:float=None, callbacks:Optional[CallbackList]=None, tot_epochs:int=None, start_epoch:int=None, metrics:OptMetrics=None, model_number:int=None, tao:int=None, delay:int=None, update_proportion:float=None, number_gpu:int=None)->None:
+    pbar = master_bar(range(epochs))
+    learn_list = {}
+    lr_list = {}
+    callbacks_list = {}
+    wd_list = {}
+    cb_handler_list = {}
+    metrics_list = {}
+    xb_list = {}
+    yb_list = {}
+    loss_list = {}
+    val_loss_list = {}
+    new_dict_list = {}
+    i = 0
+    model_average_tag = 0
+
+    for learn in learners:
+        learn_list['obj'+str(i)] = learn
+        learn_list['obj'+str(i)].model.cuda(int(i%number_gpu))
+        metrics_list['obj'+str(i)] = metrics
+        lr_list['obj'+str(i)] = learn_list['obj'+str(i)].lr_range(lr)
+        callbacks_list['obj'+str(i)] = listify(callbacks)
+        callbacks_list['obj'+str(i)].append(OneCycleScheduler(learn_list['obj'+str(i)], lr_list['obj'+str(i)], moms=moms, div_factor=div_factor, pct_start=pct_start, final_div=final_div, tot_epochs=tot_epochs, start_epoch=start_epoch, tao=tao))
+        # if wd is None:  wd_list['obj'+str(i)] = learn_list['obj'+str(i)].wd
+        if not getattr(learn_list['obj'+str(i)], 'opt', False):  learn_list['obj'+str(i)].create_opt(lr_list['obj'+str(i)], wd)
+        else: learn_list['obj'+str(i)].opt.lr, learn_list['obj'+str(i)].opt.wd = lr_list['obj'+str(i)], wd
+        callbacks_list['obj'+str(i)] = [cb(learn_list['obj'+str(i)]) for cb in learn_list['obj'+str(i)].callback_fns + listify(defaults.extra_callback_fns)] + listify(callbacks_list['obj'+str(i)])
+        assert len(learn_list['obj'+str(i)].data.train_dl) != 0, f"""Your training dataloader is empty, can't train a model. Use a smaller batch size (batch size={learn.data.train_dl.batch_size} for {len(learn.data.train_dl.dataset)} elements)."""
+        cb_handler_list['obj'+str(i)] = CallbackHandler(callbacks_list['obj'+str(i)], metrics_list['obj'+str(i)])
+        cb_handler_list['obj'+str(i)].on_train_begin(epochs, pbar=pbar, metrics=metrics_list['obj'+str(i)])
+        i = i+1
+        
+    exception=False
+    try:
+        for epoch in pbar:
+            for i in range(model_number):
+                learn_list['obj'+str(i)].model.train().cuda(int(i%number_gpu))                
+                cb_handler_list['obj'+str(i)].set_dl(learn_list['obj'+str(i)].data.train_dl)
+                cb_handler_list['obj'+str(i)].on_epoch_begin()
+                
+            # training models + local steps tao
+            for xb, yb in progress_bar(learn_list['obj0'].data.train_dl, parent=pbar):
+                split_xb = xb.split(math.ceil(xb.size()[0]/model_number/tao),0)
+                split_yb = yb.split(math.ceil(yb.size()[0]/model_number/tao),0)
+
+                for local_step in range(tao):
+                    for i in range(model_number):
+                        device_id = i%number_gpu
+                        xb_list['obj'+str(i)] = split_xb[local_step*model_number+i].cuda(device_id)
+                        yb_list['obj'+str(i)] = split_yb[local_step*model_number+i].cuda(device_id)
+                        learn_list['obj'+str(i)].model.cuda(device_id)
+                        
+                        xb_list['obj'+str(i)], yb_list['obj'+str(i)] = cb_handler_list['obj'+str(i)].on_batch_begin(xb_list['obj'+str(i)], yb_list['obj'+str(i)])
+                        
+                        loss_list['obj'+str(i)] = loss_batch(learn_list['obj'+str(i)].model, xb_list['obj'+str(i)], yb_list['obj'+str(i)], learn_list['obj'+str(i)].loss_func, learn_list['obj'+str(i)].opt, cb_handler_list['obj'+str(i)], cuda_number=i%number_gpu)
+                    # if cb_handler_list['obj'+str(i)].on_batch_end(loss_list['obj'+str(i)]):  break
+                        cb_handler_list['obj'+str(i)].on_batch_end(loss_list['obj'+str(i)])
+                            
+                        if (local_step == (delay-1) and model_average_tag):                            
+                            new_dict_list['obj'+str(i)] = OrderedDict()
+                            for k, v in learn_list['obj'+str(i)].model.state_dict().items():
+                                _k = k
+                                new_dict_list['obj'+str(i)][_k] = v
+                                if 'weight' in k or 'bias' in k:
+                                    # if '7.2.convs.2.1.weight' in k: print ("model == ", i , v)
+                                    for k2, v2 in new_dict.items():
+                                        if (k == k2):
+                                            # new_dict_list['obj'+str(i)][_k] = update_proportion * new_dict_list['obj'+str(i)][_k] + (1 - update_proportion) * new_dict[_k]
+                                            new_dict_list['obj'+str(i)][_k] = torch.cuda.comm.reduce_add([update_proportion * new_dict_list['obj'+str(i)][_k] , (1 - update_proportion) * new_dict[_k]] , destination = i%number_gpu)
+                                    
+                            learn_list['obj'+str(i)].model.load_state_dict(new_dict_list['obj'+str(i)])
+                    
+                # average models need to use add tree
+                model_average_tag = 1
+                new_dict = OrderedDict()
+                learn_list['obj0'].model.cuda(0)
+                for k, v in learn_list['obj0'].model.state_dict().items():
+                    _k = k
+                    new_dict[_k] = v
+                    if 'weight' in k or 'bias' in k:
+                        for i in range(1, model_number):
+                            for k2, v2 in learn_list['obj'+str(i)].model.state_dict().items():
+                                if (k == k2):
+                                    # new_dict[_k] = new_dict[_k] + v2
+                                    new_dict[_k] = torch.cuda.comm.reduce_add([new_dict[_k], v2], destination = 0)
+                        new_dict[_k]  = new_dict[_k]/model_number
+                if (delay == 0):
+                    new_dict_list['obj'+str(i)] = OrderedDict()
+                    for k, v in learn_list['obj'+str(i)].model.state_dict().items():
+                        _k = k
+                        new_dict_list['obj'+str(i)][_k] = v
+                        if 'weight' in k or 'bias' in k:
+                            for k2, v2 in new_dict.items():
+                                if (k == k2):
+                                    new_dict_list['obj'+str(i)][_k] = update_proportion * new_dict_list['obj'+str(i)][_k] + (1 - update_proportion) * new_dict[_k]
+                                    # new_dict_list['obj'+str(i)][_k] = torch.cuda.comm.reduce_add([update_proportion * new_dict_list['obj'+str(i)][_k] , (1 - update_proportion) * new_dict[_k]] , destination = i%number_gpu)
+                    learn_list['obj'+str(i)].model.load_state_dict(new_dict_list['obj'+str(i)])
+                
+            
+            # validate models
+            # for i in range(model_number):
+            i = 0
+            if (i==0):
+                learn_list['obj'+str(i)].model.cuda(i%number_gpu)
+                if not cb_handler_list['obj'+str(i)].skip_validate and not learn_list['obj'+str(i)].data.empty_val:
+                    val_loss_list['obj'+str(i)] = validate(learn_list['obj'+str(i)].model, learn_list['obj'+str(i)].data.valid_dl, loss_func=learn_list['obj'+str(i)].loss_func, cb_handler=cb_handler_list['obj'+str(i)], pbar=pbar, cuda_number=i%number_gpu)
+                else: val_loss_list['obj'+str(i)]=None
+                cb_handler_list['obj'+str(i)].on_epoch_end(val_loss_list['obj'+str(i)])
+
+    except Exception as e:
+        exception = e
+        raise
+    finally:
+        for i in range(model_number): cb_handler_list['obj'+str(i)].on_train_end(exception)
+
+
+def fit_average_models_one_cycle(learners:Learner, epochs:int, lr:Union[Floats,slice]=defaults.lr, moms:Tuple[float,float]=(0.95,0.85), div_factor:float=25., pct_start:float=0.3, final_div:float=None, wd:float=None, callbacks:Optional[CallbackList]=None, tot_epochs:int=None, start_epoch:int=None, metrics:OptMetrics=None, model_number:int=None, tao:int=None)->None:
+    pbar = master_bar(range(epochs))
+    learn_list = {}
+    lr_list = {}
+    callbacks_list = {}
+    wd_list = {}
+    cb_handler_list = {}
+    metrics_list = {}
+    xb_list = {}
+    yb_list = {}
+    loss_list = {}
+    val_loss_list = {}
+    i = 0
+    for learn in learners:
+        learn_list['obj'+str(i)] = learn
+        metrics_list['obj'+str(i)] = metrics
+        lr_list['obj'+str(i)] = learn_list['obj'+str(i)].lr_range(lr)
+        callbacks_list['obj'+str(i)] = listify(callbacks)
+        callbacks_list['obj'+str(i)].append(OneCycleScheduler(learn_list['obj'+str(i)], lr_list['obj'+str(i)], moms=moms, div_factor=div_factor, pct_start=pct_start, final_div=final_div, tot_epochs=tot_epochs, start_epoch=start_epoch, tao=tao))
+        # if wd is None:  wd_list['obj'+str(i)] = learn_list['obj'+str(i)].wd
+        if not getattr(learn_list['obj'+str(i)], 'opt', False):  learn_list['obj'+str(i)].create_opt(lr_list['obj'+str(i)], wd)
+        else: learn_list['obj'+str(i)].opt.lr, learn_list['obj'+str(i)].opt.wd = lr_list['obj'+str(i)], wd
+        callbacks_list['obj'+str(i)] = [cb(learn_list['obj'+str(i)]) for cb in learn_list['obj'+str(i)].callback_fns + listify(defaults.extra_callback_fns)] + listify(callbacks_list['obj'+str(i)])
+        assert len(learn_list['obj'+str(i)].data.train_dl) != 0, f"""Your training dataloader is empty, can't train a model. Use a smaller batch size (batch size={learn.data.train_dl.batch_size} for {len(learn.data.train_dl.dataset)} elements)."""
+        cb_handler_list['obj'+str(i)] = CallbackHandler(callbacks_list['obj'+str(i)], metrics_list['obj'+str(i)])
+        cb_handler_list['obj'+str(i)].on_train_begin(epochs, pbar=pbar, metrics=metrics_list['obj'+str(i)])
+        i = i+1
+
+    exception=False
+    try:
+        for epoch in pbar:
+            for i in range(model_number):
+                learn_list['obj'+str(i)].model.train()
+                cb_handler_list['obj'+str(i)].set_dl(learn_list['obj'+str(i)].data.train_dl)
+                cb_handler_list['obj'+str(i)].on_epoch_begin()
+                
+            # training models + local steps tao
+            for xb, yb in progress_bar(learn_list['obj0'].data.train_dl, parent=pbar):
+                split_xb = xb.split(math.ceil(xb.size()[0]/model_number/tao),0)
+                split_yb = yb.split(math.ceil(yb.size()[0]/model_number/tao),0)
+                
+                for i in range(model_number):
+                    # local step tao
+                    for local_step in range(tao):
+                        # print ('local step == ', local_step)
+                        xb_list['obj'+str(i)] = split_xb[local_step*model_number+i]
+                        yb_list['obj'+str(i)] = split_yb[local_step*model_number+i]
+
+                        xb_list['obj'+str(i)], yb_list['obj'+str(i)] = cb_handler_list['obj'+str(i)].on_batch_begin(xb_list['obj'+str(i)], yb_list['obj'+str(i)])
+                        loss_list['obj'+str(i)] = loss_batch(learn_list['obj'+str(i)].model, xb_list['obj'+str(i)], yb_list['obj'+str(i)], learn_list['obj'+str(i)].loss_func, learn_list['obj'+str(i)].opt, cb_handler_list['obj'+str(i)])
+                    # if cb_handler_list['obj'+str(i)].on_batch_end(loss_list['obj'+str(i)]):  break
+                        cb_handler_list['obj'+str(i)].on_batch_end(loss_list['obj'+str(i)])
+
+                # average models
+                new_dict = OrderedDict()
+                for k, v in learn_list['obj0'].model.state_dict().items():
+                    _k = k
+                    new_dict[_k] = v
+                    if 'weight' in k or 'bias' in k:
+                        for i in range(1, model_number):
+                            for k2, v2 in learn_list['obj'+str(i)].model.state_dict().items():
+                                if (k == k2):
+                                    new_dict[_k] = new_dict[_k] + v2
+                        new_dict[_k]  = new_dict[_k]/model_number
+                for i in range(model_number): learn_list['obj'+str(i)].model.load_state_dict(new_dict)
+
+            # validate models
+            for i in range(model_number):
+                if not cb_handler_list['obj'+str(i)].skip_validate and not learn_list['obj'+str(i)].data.empty_val:
+                    val_loss_list['obj'+str(i)] = validate(learn_list['obj'+str(i)].model, learn_list['obj'+str(i)].data.valid_dl, loss_func=learn_list['obj'+str(i)].loss_func, cb_handler=cb_handler_list['obj'+str(i)], pbar=pbar)
+                else: val_loss_list['obj'+str(i)]=None
+                cb_handler_list['obj'+str(i)].on_epoch_end(val_loss_list['obj'+str(i)])
+
+    except Exception as e:
+        exception = e
+        raise
+    finally:
+        for i in range(model_number): cb_handler_list['obj'+str(i)].on_train_end(exception)
+                
 
 def fit_one_cycle(learn:Learner, cyc_len:int, max_lr:Union[Floats,slice]=defaults.lr,
                   moms:Tuple[float,float]=(0.95,0.85), div_factor:float=25., pct_start:float=0.3, final_div:float=None,
@@ -237,4 +548,3 @@ class MultiLabelClassificationInterpretation(Interpretation):
         raise NotImplementedError
         super(MultiLabelClassificationInterpretation, self).__init__(learn,preds,y_true,losses,ds_type)
         self.pred_class = self.preds.sigmoid(dim=1)>thresh if sigmoid else self.preds>thresh
-       

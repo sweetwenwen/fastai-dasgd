@@ -61,10 +61,10 @@ class DistributedRecorder(LearnerCallback):
         np.save(cache_path/f'losses_{self.cuda_id}', np.array(recorder.losses))
         stats = np.array([[v] + m for v,m in zip(recorder.val_losses,recorder.metrics)])
         np.save(cache_path/f'metrics_{self.cuda_id}', stats)
+        # read_metrics(cache_path,n_gpus)
 
 def _learner_parallel(learn:Learner):
     "Use nn.DataParallel when training and remove when done"
-    if not torch.cuda.is_available(): warnings.warn('CUDA is not available, check your drivers - training will continue on CPU', ResourceWarning) 
     learn.callbacks.append(ParallelTrainer(learn))
     return learn
 

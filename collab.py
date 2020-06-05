@@ -7,6 +7,7 @@ __all__ = [*tabular.__all__, 'EmbeddingDotBias', 'EmbeddingNN', 'collab_learner'
 
 class CollabProcessor(TabularProcessor):
     "Subclass `TabularProcessor for `process_one`."
+    
     def process_one(self, item):
         res = super().process_one(item)
         return CollabLine(res.cats,res.conts,res.classes,res.names)
@@ -33,9 +34,10 @@ class EmbeddingNN(TabularModel):
     def forward(self, users:LongTensor, items:LongTensor) -> Tensor:
         return super().forward(torch.stack([users,items], dim=1), None)
 
-class EmbeddingDotBias(Module):
+class EmbeddingDotBias(nn.Module):
     "Base dot model for collaborative filtering."
     def __init__(self, n_factors:int, n_users:int, n_items:int, y_range:Tuple[float,float]=None):
+        super().__init__()
         self.y_range = y_range
         (self.u_weight, self.i_weight, self.u_bias, self.i_bias) = [embedding(*o) for o in [
             (n_users, n_factors), (n_items, n_factors), (n_users,1), (n_items,1)
@@ -87,7 +89,7 @@ class CollabLearner(Learner):
         return layer(idx).squeeze()
 
     def weight(self, arr:Collection, is_item:bool=True):
-        "Weight for item or user (based on `is_item`) for all in `arr`. (Set model to `cpu` and no grad.)"
+        "Bias for item or user (based on `is_item`) for all in `arr`. (Set model to `cpu` and no grad.)"
         idx = self.get_idx(arr, is_item)
         m = self.model
         layer = m.i_weight if is_item else m.u_weight

@@ -37,7 +37,7 @@ model_meta = {
 
     models.densenet121:{**_densenet_meta}, models.densenet169:{**_densenet_meta},
     models.densenet201:{**_densenet_meta}, models.densenet161:{**_densenet_meta},
-    models.vgg11_bn:{**_vgg_meta}, models.vgg13_bn:{**_vgg_meta}, models.vgg16_bn:{**_vgg_meta}, models.vgg19_bn:{**_vgg_meta},
+    models.vgg16_bn:{**_vgg_meta}, models.vgg19_bn:{**_vgg_meta},
     models.alexnet:{**_alexnet_meta}}
 
 def cnn_config(arch):
@@ -78,8 +78,8 @@ def create_head(nf:int, nc:int, lin_ftrs:Optional[Collection[int]]=None, ps:Floa
     return nn.Sequential(*layers)
 
 def create_cnn_model(base_arch:Callable, nc:int, cut:Union[int,Callable]=None, pretrained:bool=True,
-                     lin_ftrs:Optional[Collection[int]]=None, ps:Floats=0.5, custom_head:Optional[nn.Module]=None,
-                     bn_final:bool=False, concat_pool:bool=True):
+        lin_ftrs:Optional[Collection[int]]=None, ps:Floats=0.5, custom_head:Optional[nn.Module]=None,
+        split_on:Optional[SplitFuncOrIdxList]=None, bn_final:bool=False, concat_pool:bool=True):
     "Create custom convnet architecture"
     body = create_body(base_arch, pretrained, cut)
     if custom_head is None:
@@ -93,9 +93,10 @@ def cnn_learner(data:DataBunch, base_arch:Callable, cut:Union[int,Callable]=None
                 split_on:Optional[SplitFuncOrIdxList]=None, bn_final:bool=False, init=nn.init.kaiming_normal_,
                 concat_pool:bool=True, **kwargs:Any)->Learner:
     "Build convnet style learner."
+    print ("Build convnet style learner.")
     meta = cnn_config(base_arch)
     model = create_cnn_model(base_arch, data.c, cut, pretrained, lin_ftrs, ps=ps, custom_head=custom_head,
-        bn_final=bn_final, concat_pool=concat_pool)
+        split_on=split_on, bn_final=bn_final, concat_pool=concat_pool)
     learn = Learner(data, model, **kwargs)
     learn.split(split_on or meta['split'])
     if pretrained: learn.freeze()
@@ -113,9 +114,7 @@ def unet_learner(data:DataBunch, arch:Callable, pretrained:bool=True, blur_final
     "Build Unet learner from `data` and `arch`."
     meta = cnn_config(arch)
     body = create_body(arch, pretrained, cut)
-    try:    size = data.train_ds[0][0].size
-    except: size = next(iter(data.train_dl))[0].shape[-2:]
-    model = to_device(models.unet.DynamicUnet(body, n_classes=data.c, img_size=size, blur=blur, blur_final=blur_final,
+    model = to_device(models.unet.DynamicUnet(body, n_classes=data.c, blur=blur, blur_final=blur_final,
           self_attention=self_attention, y_range=y_range, norm_type=norm_type, last_cross=last_cross,
           bottle=bottle), data.device)
     learn = Learner(data, model, **learn_kwargs)
@@ -125,43 +124,16 @@ def unet_learner(data:DataBunch, arch:Callable, pretrained:bool=True, blur_final
     return learn
 
 @classmethod
-def _cl_int_from_learner(cls, learn:Learner, ds_type:DatasetType=DatasetType.Valid, activ:nn.Module=None, tta=False):
+def _cl_int_from_learner(cls, learn:Learner, ds_type:DatasetType=DatasetType.Valid, tta=False):
     "Create an instance of `ClassificationInterpretation`. `tta` indicates if we want to use Test Time Augmentation."
-    preds = learn.TTA(ds_type=ds_type, with_loss=True) if tta else learn.get_preds(ds_type=ds_type, activ=activ, with_loss=True)
-
+    preds = learn.TTA(ds_type=ds_type, with_loss=True) if tta else learn.get_preds(ds_type=ds_type, with_loss=True)
     return cls(learn, *preds, ds_type=ds_type)
 
 def _test_cnn(m):
     if not isinstance(m, nn.Sequential) or not len(m) == 2: return False
     return isinstance(m[1][0], (AdaptiveConcatPool2d, nn.AdaptiveAvgPool2d))
 
-def _cl_int_gradcam(self, idx, ds_type:DatasetType=DatasetType.Valid, heatmap_thresh:int=16, image:bool=True):
-    m = self.learn.model.eval()
-    im,cl = self.learn.data.dl(ds_type).dataset[idx]
-    cl = int(cl)
-    xb,_ = self.data.one_item(im, detach=False, denorm=False) #put into a minibatch of batch size = 1
-    with hook_output(m[0]) as hook_a: 
-        with hook_output(m[0], grad=True) as hook_g:
-            preds = m(xb)
-            preds[0,int(cl)].backward() 
-    acts  = hook_a.stored[0].cpu() #activation maps
-    if (acts.shape[-1]*acts.shape[-2]) >= heatmap_thresh:
-        grad = hook_g.stored[0][0].cpu()
-        grad_chan = grad.mean(1).mean(1)
-        mult = F.relu(((acts*grad_chan[...,None,None])).sum(0))
-        if image:
-            xb_im = Image(xb[0])
-            _,ax = plt.subplots()
-            sz = list(xb_im.shape[-2:])
-            xb_im.show(ax,title=f"pred. class: {self.pred_class[idx]}, actual class: {self.learn.data.classes[cl]}")
-            ax.imshow(mult, alpha=0.4, extent=(0,*sz[::-1],0),
-              interpolation='bilinear', cmap='magma')
-        return mult
-
-ClassificationInterpretation.GradCAM =_cl_int_gradcam
-
-def _cl_int_plot_top_losses(self, k, largest=True, figsize=(12,12), heatmap:bool=False, heatmap_thresh:int=16, 
-                            alpha:float=0.6, cmap:str="magma", show_text:bool=True,
+def _cl_int_plot_top_losses(self, k, largest=True, figsize=(12,12), heatmap:bool=None, heatmap_thresh:int=16,
                             return_fig:bool=None)->Optional[plt.Figure]:
     "Show images in `top_losses` along with their prediction, actual, loss, and probability of actual class."
     assert not heatmap or _test_cnn(self.learn.model), "`heatmap=True` requires a model like `cnn_learner` produces."
@@ -171,19 +143,28 @@ def _cl_int_plot_top_losses(self, k, largest=True, figsize=(12,12), heatmap:bool
     cols = math.ceil(math.sqrt(k))
     rows = math.ceil(k/cols)
     fig,axes = plt.subplots(rows, cols, figsize=figsize)
-    if show_text: fig.suptitle('Prediction/Actual/Loss/Probability', weight='bold', size=14)
+    fig.suptitle('prediction/actual/loss/probability', weight='bold', size=14)
     for i,idx in enumerate(tl_idx):
         im,cl = self.data.dl(self.ds_type).dataset[idx]
         cl = int(cl)
-        title = f'{classes[self.pred_class[idx]]}/{classes[cl]} / {self.losses[idx]:.2f} / {self.preds[idx][cl]:.2f}' if show_text else None
-        im.show(ax=axes.flat[i], title=title)
+        im.show(ax=axes.flat[i], title=
+            f'{classes[self.pred_class[idx]]}/{classes[cl]} / {self.losses[idx]:.2f} / {self.probs[idx][cl]:.2f}')
         if heatmap:
-            mult = self.GradCAM(idx,self.ds_type,heatmap_thresh,image=False)
-            if mult is not None:
+            xb,_ = self.data.one_item(im, detach=False, denorm=False)
+            m = self.learn.model.eval()
+            with hook_output(m[0]) as hook_a:
+                with hook_output(m[0], grad= True) as hook_g:
+                    preds = m(xb)
+                    preds[0,cl].backward()
+            acts = hook_a.stored[0].cpu()
+            if (acts.shape[-1]*acts.shape[-2]) >= heatmap_thresh:
+                grad = hook_g.stored[0][0].cpu()
+                grad_chan = grad.mean(1).mean(1)
+                mult = F.relu(((acts*grad_chan[...,None,None])).sum(0))
                 sz = list(im.shape[-2:])
-                axes.flat[i].imshow(mult, alpha=alpha, extent=(0,*sz[::-1],0), interpolation='bilinear', cmap=cmap)
+                axes.flat[i].imshow(mult, alpha=0.6, extent=(0,*sz[::-1],0), interpolation='bilinear', cmap='magma')                
     if ifnone(return_fig, defaults.return_fig): return fig
-    
+
 def _cl_int_plot_multi_top_losses(self, samples:int=3, figsize:Tuple[int,int]=(8,8), save_misclassified:bool=False):
     "Show images in `top_losses` along with their prediction, actual, loss, and probability of predicted class in a multilabeled dataset."
     if samples >20:
@@ -203,8 +184,8 @@ def _cl_int_plot_multi_top_losses(self, samples:int=3, figsize:Tuple[int,int]=(8
             mismatches_idxs.append(i)
             if l_dim > 1 : losses_mismatches.append((losses[i][pred], i))
             else: losses_mismatches.append((losses[i], i))
-        if l_dim > 1: infotup = (i, pred, where_truth, losses[i][pred], np.round(self.preds[i], decimals=3)[pred], mismatch)
-        else: infotup = (i, pred, where_truth, losses[i], np.round(self.preds[i], decimals=3)[pred], mismatch)
+        if l_dim > 1: infotup = (i, pred, where_truth, losses[i][pred], np.round(self.probs[i], decimals=3)[pred], mismatch)
+        else: infotup = (i, pred, where_truth, losses[i], np.round(self.probs[i], decimals=3)[pred], mismatch)
         infolist.append(infotup)
     ds = self.data.dl(self.ds_type).dataset
     mismatches = ds[mismatches_idxs]
@@ -229,7 +210,6 @@ def _cl_int_plot_multi_top_losses(self, samples:int=3, figsize:Tuple[int,int]=(8
 ClassificationInterpretation.from_learner          = _cl_int_from_learner
 ClassificationInterpretation.plot_top_losses       = _cl_int_plot_top_losses
 ClassificationInterpretation.plot_multi_top_losses = _cl_int_plot_multi_top_losses
- 
 
 def _learner_interpret(learn:Learner, ds_type:DatasetType=DatasetType.Valid, tta=False):
     "Create a `ClassificationInterpretation` object from `learner` on `ds_type` with `tta`."

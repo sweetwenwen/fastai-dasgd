@@ -40,7 +40,9 @@ class GeneralScheduler(LearnerCallback):
     def on_batch_end(self, train, **kwargs:Any)->None:
         "Take a step in lr,mom sched, start next stepper when the current one is complete."
         if train:
-            if self.idx_s >= len(self.scheds): return {'stop_training': True, 'stop_epoch': True}
+            if self.idx_s >= len(self.scheds): 
+                # print ("GeneralScheduler.on_batch_end   self.idx_s == ", self.idx_s, "len(self.scheds) == ", len(self.scheds))
+                return {'stop_training': True, 'stop_epoch': True}
             sched = self.scheds[self.idx_s]
             for k,v in sched.items(): self.opt.set_stat(k, v.step())
             if list(sched.values())[0].is_done: self.idx_s += 1

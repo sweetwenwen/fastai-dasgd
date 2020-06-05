@@ -78,7 +78,7 @@ def forget_mult_CPU(x:Tensor, f:Tensor, hidden_init:Optional[Tensor]=None, batch
         else:        result.append(prev_h)
     return torch.cat(result, dim=dim)
 
-class QRNNLayer(Module):
+class QRNNLayer(nn.Module):
     "Apply a single layer Quasi-Recurrent Neural Network (QRNN) to an input sequence."
 
     def __init__(self, input_size:int, hidden_size:int=None, save_prev_x:bool=False, zoneout:float=0, window:int=1, 
@@ -126,7 +126,7 @@ class QRNNLayer(Module):
         inp_shift = torch.cat(inp_shift, dim)
         return torch.cat([inp, inp_shift], 2)
     
-class QRNN(Module):
+class QRNN(nn.Module):
     "Apply a multiple layer Quasi-Recurrent Neural Network (QRNN) to an input sequence."
 
     def __init__(self, input_size:int, hidden_size:int, n_layers:int=1, bias:bool=True, batch_first:bool=True,
@@ -136,7 +136,7 @@ class QRNN(Module):
         assert bias == True, 'Removing underlying bias is not yet supported'
         super().__init__()
         kwargs = dict(batch_first=batch_first, zoneout=zoneout, output_gate=output_gate)
-        self.layers = nn.ModuleList([QRNNLayer(input_size if l == 0 else hidden_size, hidden_size, save_prev_x=save_prev_x, 
+        self.layers = nn.ModuleList([QRNNLayer(input_size if l == 0 else hidden_size, hidden_size, 
                                                window=((2 if l ==0 else 1) if window is None else window), **kwargs) 
                                      for l in range(n_layers)])
         if bidirectional:

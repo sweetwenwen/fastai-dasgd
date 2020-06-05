@@ -84,11 +84,6 @@ def tensor(x:Any, *rest)->Tensor:
         return res.long()
     return res
 
-class Module(nn.Module, metaclass=PrePostInitMeta):
-    "Same as `nn.Module`, but no need for subclasses to call `super().__init__`"
-    def __pre_init__(self): super().__init__()
-    def __init__(self): pass
-
 def np_address(x:np.ndarray)->int:
     "Address of `x` in memory."
     return x.__array_interface__['data'][0]
@@ -133,10 +128,6 @@ def requires_grad(m:nn.Module, b:Optional[bool]=None)->Optional[bool]:
     if b is None: return ps[0].requires_grad
     for p in ps: p.requires_grad=b
 
-def has_params(m:nn.Module)->bool:
-    "Check if `m` has at least one parameter"
-    return len(list(m.parameters())) > 0
-        
 def trainable_params(m:nn.Module)->ParamList:
     "Return list of trainable params in `m`."
     res = filter(lambda p: p.requires_grad, m.parameters())
@@ -154,11 +145,14 @@ def range_children(m:nn.Module)->Iterator[int]:
     "Return iterator of len of children of `m`."
     return range(num_children(m))
 
-class ParameterModule(Module):
+class ParameterModule(nn.Module):
     "Register a lone parameter `p` in a module."
-    def __init__(self, p:nn.Parameter): self.val = p
+    def __init__(self, p:nn.Parameter):
+        super().__init__()
+        self.val = p
+    
     def forward(self, x): return x
-
+    
 def children_and_parameters(m:nn.Module):
     "Return the children of `m` and its direct parameters not registered in modules."
     children = list(m.children())
@@ -318,6 +312,14 @@ def to_np(x):
     "Convert a tensor to a numpy array."
     return x.data.cpu().numpy()
 
+# monkey patching to allow matplotlib to plot tensors
+def tensor__array__(self, dtype=None):
+    res = to_np(self)
+    if dtype is None: return res
+    else: return res.astype(dtype, copy=False)
+Tensor.__array__ = tensor__array__
+Tensor.ndim = property(lambda x: len(x.shape))
+
 def grab_idx(x,i,batch_first:bool=True):
     "Grab the `i`-th batch in `x`, `batch_first` stating the batch dimension."
     if batch_first: return ([o[i].cpu() for o in x]   if is_listy(x) else x[i].cpu())
@@ -332,12 +334,6 @@ def logit_(x:Tensor)->Tensor:
     "Inplace logit of `x`, clamped to avoid inf"
     x.clamp_(1e-7, 1-1e-7)
     return (x.reciprocal_().sub_(1)).log_().neg_()
-
-def set_all_seed(seed:int)->None:
-    "Sets the seeds for all pseudo random generators in fastai lib"
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    random.seed(seed)
 
 def uniform(low:Number, high:Number=None, size:Optional[List[int]]=None)->FloatOrTensor:
     "Draw 1 or shape=`size` random floats from uniform dist: min=`low`, max=`high`."
@@ -398,10 +394,6 @@ def rank_distrib():
     "Return the distributed rank of this process (if applicable)."
     return int(os.environ.get('RANK', 0))
 
-def distrib_barrier():
-    "Barrier synchronization in distributed training (if applicable).  Processes in the same process group must all arrive here before proceeding further. Example use case: avoid processes stepping on each other when saving and loading models in distributed training.  See https://pytorch.org/tutorials/intermediate/ddp_tutorial.html#save-and-load-checkpoints."
-    if num_distrib() > 1: torch.distributed.barrier()
-    
 def add_metrics(last_metrics:Collection[Rank0Tensor], mets:Union[Rank0Tensor, Collection[Rank0Tensor]]):
     "Return a dictionary for updating `last_metrics` with `mets`."
     last_metrics,mets = listify(last_metrics),listify(mets)
@@ -409,19 +401,7 @@ def add_metrics(last_metrics:Collection[Rank0Tensor], mets:Union[Rank0Tensor, Co
 
 def try_save(state:Dict, path:Path=None, file:PathLikeOrBinaryStream=None):
     target = open(path/file, 'wb') if is_pathlike(file) else file
-    try: 
-        with warnings.catch_warnings():
-            #To avoid the warning that come from PyTorch about model not being checked
-            warnings.simplefilter("ignore")
-            torch.save(state, target)
+    try: torch.save(state, target)
     except OSError as e:
         raise Exception(f"{e}\n Can't write {path/file}. Pass an absolute writable pathlib obj `fname`.")
-
-def np_func(f):
-    "Convert a function taking and returning numpy arrays to one taking and returning tensors"
-    def _inner(*args, **kwargs):
-        nargs = [to_np(arg) if isinstance(arg,Tensor) else arg for arg in args]
-        return tensor(f(*nargs, **kwargs))
-    functools.update_wrapper(_inner, f)
-    return _inner
 
