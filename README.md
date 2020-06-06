@@ -6,13 +6,13 @@ This is code for paper "DaSGD: Squeezing SGD Parallelization Performance in Dist
 
 ### PyPI Install
 
-pip install fastai
+    pip install fastai
 
 ### Using DaSGD
 
 Paste our code in the Fast.Ai installation location
 
-run python train_cifar-10_asgd.py
+    python train_cifar-10_asgd.py
 
 
 
